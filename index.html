@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>投資に関する意思決定調査</title>
+<style>
+  :root { --navy:#1f3b66; --blue:#2e5b9e; --accent:#b03a2e; --green:#1e6b3a; --bg:#f5f7fa; }
+  * { box-sizing:border-box; }
+  body { font-family:"Hiragino Sans","Yu Gothic",Meiryo,sans-serif; background:var(--bg); margin:0; color:#222; line-height:1.65; }
+  #app { max-width:640px; margin:0 auto; padding:16px; }
+  .card { background:#fff; border-radius:12px; padding:20px; margin:12px 0; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  h1 { font-size:1.25rem; color:var(--navy); }
+  h2 { font-size:1.05rem; color:var(--blue); border-bottom:2px solid var(--blue); padding-bottom:4px; }
+  button.main { display:block; width:100%; padding:14px; font-size:1.05rem; background:var(--blue); color:#fff; border:none; border-radius:8px; cursor:pointer; margin-top:14px; }
+  button.main:disabled { background:#aab; }
+  table { border-collapse:collapse; width:100%; font-size:.82rem; margin:8px 0; }
+  th,td { border:1px solid #ccd; padding:4px 6px; text-align:center; }
+  th { background:var(--navy); color:#fff; font-weight:600; }
+  .fund { border:2px solid #ccd; border-radius:10px; padding:10px 12px; margin:8px 0; cursor:pointer; background:#fff; }
+  .fund.sel { border-color:var(--accent); background:#fdf2f0; }
+  .fund h3 { margin:0 0 4px; font-size:.95rem; color:var(--navy); }
+  .ai { background:#eef6ff; border-left:4px solid var(--blue); padding:8px 10px; font-size:.86rem; margin-top:6px; border-radius:0 6px 6px 0; }
+  .warn { background:#fbeeec; border-left:4px solid var(--accent); padding:8px 10px; font-size:.9rem; margin:8px 0; }
+  .ok { background:#eaf3ec; border-left:4px solid var(--green); padding:8px 10px; font-size:.9rem; margin:8px 0; }
+  input[type=range] { width:100%; }
+  .big { font-size:1.3rem; font-weight:700; color:var(--navy); }
+  label.opt { display:block; padding:8px 10px; border:1px solid #ccd; border-radius:8px; margin:6px 0; cursor:pointer; }
+  label.opt:has(input:checked) { border-color:var(--accent); background:#fdf2f0; }
+  .small { font-size:.8rem; color:#666; }
+  .center { text-align:center; }
+  .badge { display:inline-block; background:var(--navy); color:#fff; border-radius:12px; padding:1px 10px; font-size:.75rem; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+"use strict";
+/* ================= 設定（学生が編集する箇所） ================= */
+const GAS_URL = "ここにGASウェブアプリのURLを貼る";   // gas_backend.gs をデプロイして取得
+const FORCE_GROUP = null;         // "AI" / "CTRL" で固定（テスト用）。本番は null
+const SEED = 20261212;            // 共通乱数のシード（全参加者共通・変更しないこと）
+
+/* ================= 実験パラメータ ================= */
+// 資産（年率%換算のイメージ）: A株式(ハイテク) B株式(公益) C社債 D商品(コモディティ) + 無リスクF
+const ASSETS = ["A：株式(ハイテク)", "B：株式(公益)", "C：社債", "D：商品(コモディティ)"];
+const MU  = [8.0, 4.0, 2.5, 2.0];
+const SD  = [20.0, 10.0, 6.0, 22.0];
+const CORR = [[1,.3,.1,.2],[.3,1,.4,.2],[.1,.4,1,.1],[.2,.2,.1,1]];
+const RF = 1.0;
+// 商品（投資信託）: wf=無リスク比率, w=リスク資産[A,B,C,D]比率
+const FUNDS = [
+  { key:"F1", name:"商品1", wf:0.00, w:[0.60,0.30,0.10,0.00] },  // HRHR・効率的（接点PF）
+  { key:"F2", name:"商品2", wf:0.00, w:[0.20,0.30,0.00,0.50] },  // HRLR・非効率（劣後）
+  { key:"F3", name:"商品3", wf:0.60, w:[0.24,0.12,0.04,0.00] },  // LRLR・効率線上（商品1×40%+F60%）
+  { key:"F4", name:"商品4", wf:1.00, w:[0.00,0.00,0.00,0.00] },  // 無リスク100%
+];
+const N_PRACTICE = 4, N_TOTAL = 8;   // R1-4練習（AI群は助言あり）/ R5-8本番（全員AIなし）
+const START_WEALTH = 10000;
+const GP_ENDOWMENT = 1000;
+
+/* ================= 商品の統計量（自動計算） ================= */
+function chol(m){ const n=m.length,L=Array.from({length:n},()=>Array(n).fill(0));
+  for(let i=0;i<n;i++)for(let j=0;j<=i;j++){let s=m[i][j];for(let k=0;k<j;k++)s-=L[i][k]*L[j][k];
+    L[i][j]=(i===j)?Math.sqrt(s):s/L[j][j];} return L; }
+const COV = CORR.map((row,i)=>row.map((c,j)=>c*SD[i]*SD[j]));
+const L_CHOL = chol(CORR);
+function fundStats(f){
+  const m = f.wf*RF + f.w.reduce((s,wi,i)=>s+wi*MU[i],0);
+  let v=0; for(let i=0;i<4;i++)for(let j=0;j<4;j++) v+=f.w[i]*f.w[j]*COV[i][j];
+  const s=Math.sqrt(v);
+  return { mu:m, sd:s, sharpe: s>0 ? (m-RF)/s : null };
+}
+FUNDS.forEach(f=>Object.assign(f, fundStats(f)));
+
+/* ================= 共通乱数（全参加者で同一の市場系列） ================= */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}
+const rngMarket = mulberry32(SEED);
+function normPair(){ const u=Math.max(rngMarket(),1e-9), v=rngMarket();
+  const r=Math.sqrt(-2*Math.log(u)); return [r*Math.cos(2*Math.PI*v), r*Math.sin(2*Math.PI*v)]; }
+const MARKET = [];   // MARKET[round] = 各資産の実現リターン(%)
+for(let rd=0; rd<N_TOTAL; rd++){
+  const z=[...normPair(),...normPair()];
+  const zc=[0,1,2,3].map(i=>[0,1,2,3].reduce((s,k)=>s+L_CHOL[i][k]*z[k],0));
+  MARKET.push([0,1,2,3].map(i=>MU[i]+SD[i]*zc[i]));
+}
+// 暴落ショック（設計書§8：本番期に1回・全員共通・決定論的）
+const SHOCK_ROUND = 6;   // R7（0始まり）
+MARKET[SHOCK_ROUND] = MU.map((m,i)=> m - 1.8*SD[i]);   // 全リスク資産が-1.8σの急落
+function fundReturn(f, rd){ return f.wf*RF + f.w.reduce((s,wi,i)=>s+wi*MARKET[rd][i],0); }
+
+/* ================= 状態 ================= */
+const S = { pid:null, group:null, screen:0, round:0, wealth:START_WEALTH,
+  data:{ consent_ts:null, demog:{}, mpl:[], gp_pre:null, gp_post:null,
+         rounds:[], rank_pred:{}, post:{}, completion_code:null } };
+const rngLocal = mulberry32(Date.now()%2147483647);
+
+/* ================= ユーティリティ ================= */
+const app = document.getElementById("app");
+function render(html){ app.innerHTML = html; window.scrollTo(0,0); }
+function fmt(x,d=1){ return (x>=0?"+":"")+x.toFixed(d); }
+function assetTable(){
+  let h="<table><tr><th>資産</th><th>期待リターン</th><th>リスク(標準偏差)</th></tr>";
+  for(let i=0;i<4;i++) h+=`<tr><td>${ASSETS[i]}</td><td>${MU[i].toFixed(1)}%</td><td>${SD[i].toFixed(0)}%</td></tr>`;
+  h+=`<tr><td>無リスク資産F</td><td>${RF.toFixed(1)}%</td><td>0%</td></tr></table>`;
+  h+=`<div class="small">資産間の相関：A-B 0.3／A-C 0.1／A-D 0.2／B-C 0.4／B-D 0.2／C-D 0.1</div>`;
+  return h;
+}
+function weightTable(f){
+  const rows = f.w.map((wi,i)=> wi>0?`<tr><td>${ASSETS[i]}</td><td>${(wi*100).toFixed(0)}%</td></tr>`:"").join("");
+  const rf = f.wf>0?`<tr><td>無リスク資産F</td><td>${(f.wf*100).toFixed(0)}%</td></tr>`:"";
+  return `<table><tr><th>組入資産</th><th>保有割合</th></tr>${rows}${rf}</table>`;
+}
+
+/* ================= 画面フロー ================= */
+function screenConsent(){
+  render(`<div class="card"><h1>投資に関する意思決定調査</h1>
+  <p>本調査は大学の研究として実施する、仮想の投資ゲームを用いた調査です（所要15〜20分）。</p>
+  <ul class="small"><li>回答は匿名で、統計的に処理されます。</li>
+  <li>途中で中断・撤回しても不利益はありません。</li>
+  <li>ゲームの成績に応じて謝礼が変動する場合があります（募集ページの記載に従います）。</li>
+  <li>調査終了時に表示される<b>完了コード</b>を募集ページに入力してください。</li></ul>
+  <button class="main" onclick="agree()">同意して開始する</button></div>`);
+}
+async function agree(){
+  S.data.consent_ts = new Date().toISOString();
+  render(`<div class="card center"><p>準備中です…</p></div>`);
+  try{
+    const res = await fetch(`${GAS_URL}?action=assign`);
+    const j = await res.json(); S.pid=j.pid; S.group=j.group;
+  }catch(e){
+    S.pid = "local-"+Math.floor(rngLocal()*1e8);
+    S.group = rngLocal()<0.5 ? "AI" : "CTRL";
+  }
+  if(FORCE_GROUP) S.group = FORCE_GROUP;
+  screenDemog();
+}
+function screenDemog(){
+  const opts=(name,arr)=>arr.map(o=>`<label class="opt"><input type="radio" name="${name}" value="${o}"> ${o}</label>`).join("");
+  render(`<div class="card"><h2>あなたについて</h2>
+  <p><b>年代</b></p>${opts("age",["18-24歳","25-34歳","35-44歳","45-54歳","55歳以上"])}
+  <p><b>性別</b></p>${opts("sex",["男性","女性","その他","回答しない"])}
+  <p><b>投資経験（株式・投資信託など）</b></p>${opts("inv",["経験なし","1年未満","1〜5年","5年以上"])}
+  <p><b>生成AI（ChatGPT等）の利用頻度</b></p>${opts("ai",["使わない","月に数回","週に数回","ほぼ毎日"])}
+  <button class="main" onclick="saveDemog()">次へ</button></div>`);
+}
+function saveDemog(){
+  const get=n=>{const el=document.querySelector(`input[name=${n}]:checked`);return el?el.value:null;};
+  const d={age:get("age"),sex:get("sex"),invest_exp:get("inv"),ai_use:get("ai")};
+  if(Object.values(d).some(v=>!v)){alert("すべての項目にお答えください");return;}
+  S.data.demog=d; screenMPL();
+}
+function screenMPL(){
+  const q=(i,later)=>`<p><b>質問${i+1}：</b>どちらを選びますか？</p>
+  <label class="opt"><input type="radio" name="mpl${i}" value="today"> 今日 10,000円 を受け取る</label>
+  <label class="opt"><input type="radio" name="mpl${i}" value="later"> 1か月後 ${later.toLocaleString()}円 を受け取る</label>`;
+  render(`<div class="card"><h2>お金の受け取り方について</h2>
+  <p class="small">仮想の状況です。直感でお答えください。</p>
+  ${q(0,10500)}${q(1,11000)}${q(2,12000)}
+  <button class="main" onclick="saveMPL()">次へ</button></div>`);
+}
+function saveMPL(){
+  const a=[0,1,2].map(i=>{const el=document.querySelector(`input[name=mpl${i}]:checked`);return el?el.value:null;});
+  if(a.some(v=>!v)){alert("すべての質問にお答えください");return;}
+  S.data.mpl=a; screenGP("pre");
+}
+function screenGP(slot){
+  render(`<div class="card"><h2>投資課題（${slot==="pre"?"ゲームの前に":"最後に"}）</h2>
+  <p>あなたは <b>${GP_ENDOWMENT}ポイント</b> を持っています。このうち好きな額を「くじ資産」に投資できます。</p>
+  <div class="warn">くじ資産：<b>確率50%で投資額が2.5倍</b>になり、<b>確率50%で投資額は0</b>になります。投資しなかった分はそのまま手元に残ります。</div>
+  ${slot==="post"?'<p class="small">※先ほどとは<b>別の抽選</b>です。今の気持ちでお答えください。</p>':""}
+  <p>投資額：<span id="gpv" class="big">500</span> ポイント</p>
+  <input type="range" min="0" max="${GP_ENDOWMENT}" step="10" value="500" oninput="document.getElementById('gpv').textContent=this.value">
+  <button class="main" onclick="saveGP('${slot}')">決定</button></div>`);
+}
+function saveGP(slot){
+  const v=parseInt(document.querySelector("input[type=range]").value);
+  if(slot==="pre"){S.data.gp_pre=v; screenTutorial();}
+  else{S.data.gp_post=v; screenPost();}
+}
+function screenTutorial(){
+  render(`<div class="card"><h2>投資ゲームの説明</h2>
+  <p>これから <b>全${N_TOTAL}ラウンド</b> の投資ゲームを行います。あなたの元手は <b>${START_WEALTH.toLocaleString()}ポイント</b> です。</p>
+  <p>毎ラウンド、<b>4つの投資信託（商品1〜4）</b>から1つを選び、全財産をそのラウンドだけ投資します。各商品は下の5つの資産を組み合わせて作られており、<b>組入資産と保有割合だけ</b>が表示されます。</p>
+  ${assetTable()}
+  <div class="warn">商品のリターンとリスクは<b>保有割合からは直接わかりません</b>。組入資産の割合・各資産の数値・相関から計算する必要があります。</div>
+  ${S.group==="AI" ? '<div class="ai">🤖 あなたには前半のラウンドで <b>AIアシスタント</b> が付き、各商品の期待リターン・リスクの計算結果を提示します。</div>' : ''}
+  <p class="small">最終ポイントが高いほど謝礼が増える場合があります。真剣にお選びください。</p>
+  <button class="main" onclick="screenRound()">ゲームを始める</button></div>`);
+}
+function screenRound(){
+  const rd=S.round, ai_on=(S.group==="AI" && rd<N_PRACTICE);
+  const phase = rd<N_PRACTICE ? "前半" : "後半";
+  let aiNote="";
+  if(S.group==="AI" && rd===N_PRACTICE) aiNote=`<div class="warn">⚠️ ここから <b>AIアシスタントは利用できません</b>。ご自身の判断でお選びください。</div>`;
+  const cards = FUNDS.map((f,i)=>{
+    let ai="";
+    if(ai_on){
+      const tag = f.sharpe===null ? "（リスクなし）" :
+        (Math.abs(f.sharpe-Math.max(...FUNDS.filter(x=>x.sharpe!==null).map(x=>x.sharpe)))<1e-9 ? "／効率的です" : "／同じリスクでより高いリターンの組合せが存在します");
+      ai=`<div class="ai">🤖 AI計算：期待リターン <b>${f.mu.toFixed(2)}%</b>・リスク(σ) <b>${f.sd.toFixed(2)}%</b>${tag}</div>`;
+    }
+    return `<div class="fund" id="fund${i}" onclick="selFund(${i})"><h3>${f.name}</h3>${weightTable(f)}${ai}</div>`;
+  }).join("");
+  render(`<div class="card"><span class="badge">ラウンド ${rd+1} / ${N_TOTAL}（${phase}${ai_on?"・AIあり":"・AIなし"}）</span>
+  <p>現在の資産：<span class="big">${Math.round(S.wealth).toLocaleString()}</span> ポイント</p>
+  ${aiNote}${assetTable()}
+  <h2>どの商品に投資しますか？</h2>${cards}
+  <button class="main" id="goBtn" disabled onclick="resolveRound()">この商品に投資する</button></div>`);
+}
+let selIdx=null;
+function selFund(i){ selIdx=i;
+  FUNDS.forEach((_,k)=>document.getElementById("fund"+k).classList.toggle("sel",k===i));
+  document.getElementById("goBtn").disabled=false;
+}
+function resolveRound(){
+  const rd=S.round, f=FUNDS[selIdx];
+  const r=fundReturn(f,rd), before=S.wealth;
+  S.wealth = S.wealth*(1+r/100);
+  S.data.rounds.push({round:rd+1, phase: rd<N_PRACTICE?"practice":"test",
+    ai_on:(S.group==="AI"&&rd<N_PRACTICE), shock:(rd===SHOCK_ROUND), choice:f.key,
+    fund_mu:f.mu.toFixed(2), fund_sd:f.sd.toFixed(2), ret:r.toFixed(2), wealth_after:Math.round(S.wealth)});
+  const col = r>=0 ? "ok" : "warn";
+  const shockNote = (rd===SHOCK_ROUND) ? `<div class="warn">‼️ 信用不安が連鎖し、市場全体が急落しました。</div>` : "";
+  render(`<div class="card center"><span class="badge">ラウンド ${rd+1} の結果</span>
+  ${shockNote}
+  <p>${f.name} のリターン：<span class="big">${fmt(r,2)}%</span></p>
+  <div class="${col}">資産：${Math.round(before).toLocaleString()} → <b>${Math.round(S.wealth).toLocaleString()}</b> ポイント</div>
+  <button class="main" onclick="afterRound()">次へ</button></div>`);
+  selIdx=null;
+}
+function afterRound(){
+  S.round++;
+  if(S.round===N_PRACTICE) screenRank("mid");
+  else if(S.round>=N_TOTAL) screenRank("end");
+  else screenRound();
+}
+function screenRank(slot){
+  render(`<div class="card"><h2>成績の予想</h2>
+  <p>ここまでのあなたの成績は、<b>参加者全体の中で上位何%</b>くらいだと思いますか？（0=トップ、100=最下位）</p>
+  <p class="center"><span id="rv" class="big">50</span> %</p>
+  <input type="range" min="0" max="100" value="50" oninput="document.getElementById('rv').textContent=this.value">
+  <button class="main" onclick="saveRank('${slot}')">決定</button></div>`);
+}
+function saveRank(slot){
+  S.data.rank_pred[slot]=parseInt(document.querySelector("input[type=range]").value);
+  if(slot==="mid") screenRound(); else screenGP("post");
+}
+function screenPost(){
+  render(`<div class="card"><h2>最後に</h2>
+  <p><b>ゲーム全体の満足度</b>（1=不満 〜 7=満足）</p>
+  <p class="center"><span id="sv" class="big">4</span></p>
+  <input type="range" min="1" max="7" value="4" oninput="document.getElementById('sv').textContent=this.value">
+  <p><b>後半（AIなし）のラウンドで、商品をどう選びましたか？</b></p>
+  <textarea id="reason" rows="3" style="width:100%"></textarea>
+  <button class="main" onclick="finish()">回答を送信する</button></div>`);
+}
+async function finish(){
+  S.data.post={satisfaction:parseInt(document.querySelector("input[type=range]").value),
+               reason:document.getElementById("reason").value||""};
+  S.data.completion_code = "SU" + String(Math.floor(rngLocal()*9e5)+1e5) + (S.pid+"").slice(-3);
+  const payload={pid:S.pid, group:S.group, seed:SEED, final_wealth:Math.round(S.wealth),
+                 ua:navigator.userAgent.slice(0,80), ...S.data};
+  render(`<div class="card center"><p>送信中…</p></div>`);
+  try{ await fetch(GAS_URL,{method:"POST",mode:"no-cors",
+       headers:{"Content-Type":"text/plain"},body:JSON.stringify(payload)}); }catch(e){}
+  render(`<div class="card center"><h1>ご協力ありがとうございました</h1>
+  <p>最終資産：<span class="big">${Math.round(S.wealth).toLocaleString()}</span> ポイント</p>
+  <div class="ok">あなたの完了コード：<div class="big">${S.data.completion_code}</div>
+  このコードを募集ページ（クラウドソーシング）に入力してください。</div>
+  <p class="small">本調査は、AIによる情報提供が投資の意思決定に与える影響を調べる研究の一部です。表示された商品・リターンはすべて架空のものです。</p></div>`);
+}
+screenConsent();
+</script>
+</body>
+</html>
