@@ -37,8 +37,9 @@
 <script>
 "use strict";
 /* ================= 設定（学生が編集する箇所） ================= */
-const GAS_URL = "https://script.google.com/macros/s/AKfycby53ROppj9NVMDs3bi2a_JzORaat1IA8orTMRmwl0nSKbVsU6gkZnKCep1wVdK92oG_/exec";   // gas_backend.gs をデプロイして取得
-const FORCE_GROUP = "AI";         // "AI" / "CTRL" で固定（テスト用）。本番は null
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzTS98EQAwpk6zrqEr74h2sM46WNGv9N8c_QQBwv0SSPkyuvatx_kxtxoQa_NNJS8tS/exec";   // gas_backend.gs をデプロイして取得
+const FORCE_GROUP = null;         // "AI" / "CTRL" で固定（テスト用）。本番は null
+const USE_CHAT_AI = true;         // true=ChatGPTに相談する方式 / false=計算結果を自動表示する方式
 const SEED = 20261212;            // 共通乱数のシード（全参加者共通・変更しないこと）
 
 /* ================= 実験パラメータ ================= */
@@ -49,12 +50,21 @@ const SD  = [20.0, 10.0, 6.0, 22.0];
 const CORR = [[1,.3,.1,.2],[.3,1,.4,.2],[.1,.4,1,.1],[.2,.2,.1,1]];
 const RF = 1.0;
 // 商品（投資信託）: wf=無リスク比率, w=リスク資産[A,B,C,D]比率
-const FUNDS = [
-  { key:"F1", name:"商品1", wf:0.00, w:[0.60,0.30,0.10,0.00] },  // HRHR・効率的（接点PF）
-  { key:"F2", name:"商品2", wf:0.00, w:[0.20,0.30,0.00,0.50] },  // HRLR・非効率（劣後）
-  { key:"F3", name:"商品3", wf:0.60, w:[0.24,0.12,0.04,0.00] },  // LRLR・効率線上（商品1×40%+F60%）
-  { key:"F4", name:"商品4", wf:1.00, w:[0.00,0.00,0.00,0.00] },  // 無リスク100%
+// 前半（練習期・商品1〜4）と後半（本番期・商品5〜8）は役割が同型・中身は別。
+// 前半で「商品1が正解」と覚えても後半には持ち越せない＝知識の持ち越しとリスク選好の持続を切り分ける。
+const FUNDS_P = [
+  { key:"P1", name:"商品1", wf:0.00, w:[0.60,0.30,0.10,0.00] },  // HRHR・効率的（接点PF）
+  { key:"P2", name:"商品2", wf:0.00, w:[0.20,0.30,0.00,0.50] },  // HRLR・非効率（劣後）
+  { key:"P3", name:"商品3", wf:0.60, w:[0.24,0.12,0.04,0.00] },  // LRLR・効率線上（商品1×40%+F60%）
+  { key:"P4", name:"商品4", wf:1.00, w:[0.00,0.00,0.00,0.00] },  // 無リスク100%
 ];
+const FUNDS_T = [
+  { key:"T1", name:"商品5", wf:0.00, w:[0.65,0.20,0.15,0.00] },  // HRHR・効率的
+  { key:"T2", name:"商品6", wf:0.00, w:[0.25,0.15,0.00,0.60] },  // HRLR・非効率（劣後）
+  { key:"T3", name:"商品7", wf:0.60, w:[0.26,0.08,0.06,0.00] },  // LRLR・効率線上（商品5×40%+F60%）
+  { key:"T4", name:"商品8", wf:1.00, w:[0.00,0.00,0.00,0.00] },  // 無リスク100%
+];
+const TEST_ORDER = [2,0,3,1];   // 後半の表示順（固定・全員共通）：位置の持ち越しも防ぐ
 const N_PRACTICE = 4, N_TOTAL = 8;   // R1-4練習（AI群は助言あり）/ R5-8本番（全員AIなし）
 const START_WEALTH = 10000;
 const GP_ENDOWMENT = 1000;
@@ -71,7 +81,8 @@ function fundStats(f){
   const s=Math.sqrt(v);
   return { mu:m, sd:s, sharpe: s>0 ? (m-RF)/s : null };
 }
-FUNDS.forEach(f=>Object.assign(f, fundStats(f)));
+[...FUNDS_P, ...FUNDS_T].forEach(f=>Object.assign(f, fundStats(f)));
+function fundsFor(rd){ return rd<N_PRACTICE ? FUNDS_P : TEST_ORDER.map(i=>FUNDS_T[i]); }
 
 /* ================= 共通乱数（全参加者で同一の市場系列） ================= */
 function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
@@ -92,14 +103,17 @@ function fundReturn(f, rd){ return f.wf*RF + f.w.reduce((s,wi,i)=>s+wi*MARKET[rd
 
 /* ================= 状態 ================= */
 const S = { pid:null, group:null, screen:0, round:0, wealth:START_WEALTH,
+  aiQ:null, aiAnswer:null, apiFail:false,
   data:{ consent_ts:null, demog:{}, mpl:[], gp_pre:null, gp_post:null,
          rounds:[], rank_pred:{}, post:{}, completion_code:null } };
 const rngLocal = mulberry32(Date.now()%2147483647);
 
 /* ================= ユーティリティ ================= */
 const app = document.getElementById("app");
-function render(html){ app.innerHTML = html; window.scrollTo(0,0); }
+const TLOG=[];
+function render(html){ TLOG.push(Date.now()); app.innerHTML = html; window.scrollTo(0,0); }
 function fmt(x,d=1){ return (x>=0?"+":"")+x.toFixed(d); }
+function esc(t){ return String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\n/g,"<br>"); }
 function assetTable(){
   let h="<table><tr><th>資産</th><th>期待リターン</th><th>リスク(標準偏差)</th></tr>";
   for(let i=0;i<4;i++) h+=`<tr><td>${ASSETS[i]}</td><td>${MU[i].toFixed(1)}%</td><td>${SD[i].toFixed(0)}%</td></tr>`;
@@ -121,14 +135,25 @@ function screenConsent(){
   <li>途中で中断・撤回しても不利益はありません。</li>
   <li>ゲームの成績に応じて謝礼が変動する場合があります（募集ページの記載に従います）。</li>
   <li>調査終了時に表示される<b>完了コード</b>を募集ページに入力してください。</li></ul>
+  <p><b>クラウドソーシングのワーカーID</b>（謝礼の照合に使用します）</p>
+  <input type="text" id="wid" style="width:100%;padding:10px;font-size:1rem;border:1px solid #ccd;border-radius:8px" placeholder="例：abcd1234">
+  <div style="position:absolute;left:-9999px;top:-9999px" aria-hidden="true">
+    <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
+  </div>
   <button class="main" onclick="agree()">同意して開始する</button></div>`);
 }
 async function agree(){
+  const wid=(document.getElementById("wid").value||"").trim();
+  if(!/^[A-Za-z0-9_-]{3,30}$/.test(wid)){alert("ワーカーIDを半角英数字で入力してください");return;}
+  S.wid=wid; S.hp=(document.getElementById("website").value||"");
   S.data.consent_ts = new Date().toISOString();
   render(`<div class="card center"><p>準備中です…</p></div>`);
   try{
-    const res = await fetch(`${GAS_URL}?action=assign`);
-    const j = await res.json(); S.pid=j.pid; S.group=j.group;
+    const res = await fetch(`${GAS_URL}?action=assign&worker=${encodeURIComponent(wid)}`);
+    const j = await res.json();
+    if(j.dup){ render(`<div class="card center"><h2>ご参加について</h2>
+      <p>このワーカーIDでは既にご参加いただいています。<br>本調査は1人1回までです。ご協力ありがとうございました。</p></div>`); return; }
+    S.pid=j.pid; S.group=j.group;
   }catch(e){
     S.pid = "local-"+Math.floor(rngLocal()*1e8);
     S.group = rngLocal()<0.5 ? "AI" : "CTRL";
@@ -158,12 +183,15 @@ function screenMPL(){
   render(`<div class="card"><h2>お金の受け取り方について</h2>
   <p class="small">仮想の状況です。直感でお答えください。</p>
   ${q(0,10500)}${q(1,11000)}${q(2,12000)}
+  <p><b>質問4：</b>確認のため、この質問では「今日 10,000円 を受け取る」を選んでください</p>
+  <label class="opt"><input type="radio" name="mpl3" value="today"> 今日 10,000円 を受け取る</label>
+  <label class="opt"><input type="radio" name="mpl3" value="later"> 1か月後 11,000円 を受け取る</label>
   <button class="main" onclick="saveMPL()">次へ</button></div>`);
 }
 function saveMPL(){
-  const a=[0,1,2].map(i=>{const el=document.querySelector(`input[name=mpl${i}]:checked`);return el?el.value:null;});
+  const a=[0,1,2,3].map(i=>{const el=document.querySelector(`input[name=mpl${i}]:checked`);return el?el.value:null;});
   if(a.some(v=>!v)){alert("すべての質問にお答えください");return;}
-  S.data.mpl=a; screenGP("pre");
+  S.data.mpl=a.slice(0,3); S.data.attn_pass=(a[3]==="today"); screenGP("pre");
 }
 function screenGP(slot){
   render(`<div class="card"><h2>投資課題（${slot==="pre"?"ゲームの前に":"最後に"}）</h2>
@@ -182,23 +210,26 @@ function saveGP(slot){
 function screenTutorial(){
   render(`<div class="card"><h2>投資ゲームの説明</h2>
   <p>これから <b>全${N_TOTAL}ラウンド</b> の投資ゲームを行います。あなたの元手は <b>${START_WEALTH.toLocaleString()}ポイント</b> です。</p>
-  <p>毎ラウンド、<b>4つの投資信託（商品1〜4）</b>から1つを選び、全財産をそのラウンドだけ投資します。各商品は下の5つの資産を組み合わせて作られており、<b>組入資産と保有割合だけ</b>が表示されます。</p>
+  <p>毎ラウンド、<b>4つの投資信託</b>から1つを選び、全財産をそのラウンドだけ投資します。前半は商品1〜4、<b>後半は新しい商品5〜8</b>に入れ替わります。各商品は下の5つの資産を組み合わせて作られており、<b>組入資産と保有割合だけ</b>が表示されます。</p>
   ${assetTable()}
   <div class="warn">商品のリターンとリスクは<b>保有割合からは直接わかりません</b>。組入資産の割合・各資産の数値・相関から計算する必要があります。</div>
-  ${S.group==="AI" ? '<div class="ai">🤖 あなたには前半のラウンドで <b>AIアシスタント</b> が付き、各商品の期待リターン・リスクの計算結果を提示します。</div>' : ''}
+  ${S.group==="AI" ? '<div class="ai">🤖 あなたには前半のラウンドで <b>AIアドバイザー</b> が付きます。投資先を選ぶ前に、商品についてAIに質問できます。</div>' : ''}
   <p class="small">最終ポイントが高いほど謝礼が増える場合があります。真剣にお選びください。</p>
   <button class="main" onclick="screenRound()">ゲームを始める</button></div>`);
 }
 function screenRound(){
   const rd=S.round, ai_on=(S.group==="AI" && rd<N_PRACTICE);
+  if(ai_on && USE_CHAT_AI && S.aiAnswer===null) return screenAsk();
   const phase = rd<N_PRACTICE ? "前半" : "後半";
   let aiNote="";
-  if(S.group==="AI" && rd===N_PRACTICE) aiNote=`<div class="warn">⚠️ ここから <b>AIアシスタントは利用できません</b>。ご自身の判断でお選びください。</div>`;
-  const cards = FUNDS.map((f,i)=>{
+  if(rd===N_PRACTICE) aiNote=`<div class="warn">⚠️ 後半は<b>新しい4つの商品（商品5〜8）</b>に入れ替わります${S.group==="AI"?"。また、ここから<b>AIアドバイザーは利用できません</b>":""}。ご自身の判断でお選びください。</div>`;
+  if(ai_on && USE_CHAT_AI && S.aiAnswer) aiNote+=`<div class="ai">🤖 <b>AIアドバイザーの回答</b>（あなたの質問：「${esc(S.aiQ)}」）<br>${esc(S.aiAnswer)}</div>`;
+  const FS = fundsFor(rd); S.curFunds = FS;
+  const cards = FS.map((f,i)=>{
     let ai="";
-    if(ai_on){
+    if(ai_on && !USE_CHAT_AI){
       const tag = f.sharpe===null ? "（リスクなし）" :
-        (Math.abs(f.sharpe-Math.max(...FUNDS.filter(x=>x.sharpe!==null).map(x=>x.sharpe)))<1e-9 ? "／効率的です" : "／同じリスクでより高いリターンの組合せが存在します");
+        (Math.abs(f.sharpe-Math.max(...FS.filter(x=>x.sharpe!==null).map(x=>x.sharpe)))<1e-9 ? "／効率的です" : "／同じリスクでより高いリターンの組合せが存在します");
       ai=`<div class="ai">🤖 AI計算：期待リターン <b>${f.mu.toFixed(2)}%</b>・リスク(σ) <b>${f.sd.toFixed(2)}%</b>${tag}</div>`;
     }
     return `<div class="fund" id="fund${i}" onclick="selFund(${i})"><h3>${f.name}</h3>${weightTable(f)}${ai}</div>`;
@@ -209,18 +240,49 @@ function screenRound(){
   <h2>どの商品に投資しますか？</h2>${cards}
   <button class="main" id="goBtn" disabled onclick="resolveRound()">この商品に投資する</button></div>`);
 }
+function screenAsk(){
+  const rd=S.round;
+  render(`<div class="card"><span class="badge">ラウンド ${rd+1} / ${N_TOTAL}（前半・AIあり）</span>
+  <p>現在の資産：<span class="big">${Math.round(S.wealth).toLocaleString()}</span> ポイント</p>
+  ${assetTable()}
+  <h2>🤖 AIアドバイザーに相談</h2>
+  <p>投資先を選ぶ前に、AIアドバイザーに<b>1回</b>質問できます。商品や資産について、聞きたいことを自由に入力してください。</p>
+  <textarea id="aiq" rows="3" maxlength="200" style="width:100%;padding:10px;border:1px solid #ccd;border-radius:8px"
+    placeholder="例：4つの商品のうち、どれが一番有利ですか？"></textarea>
+  <button class="main" onclick="askAI()">AIに相談する</button></div>`);
+}
+async function askAI(){
+  const q=(document.getElementById("aiq").value||"").trim();
+  if(q.length<2){alert("質問を入力してください");return;}
+  S.aiQ=q;
+  render(`<div class="card center"><p>🤖 AIが回答を作成しています…<br><span class="small">（10秒ほどかかることがあります）</span></p></div>`);
+  let ans=null;
+  try{
+    const res=await fetch(`${GAS_URL}?action=ask&pid=${encodeURIComponent(S.pid)}&round=${S.round+1}&q=${encodeURIComponent(q)}`);
+    const j=await res.json(); if(j.answer) ans=j.answer;
+  }catch(e){}
+  if(!ans){
+    S.apiFail=true;
+    ans="（通信に失敗したため、計算結果をそのまま表示します）" +
+        FUNDS_P.map(f=>`${f.name}：期待リターン${f.mu.toFixed(2)}%・リスク（標準偏差）${f.sd.toFixed(2)}%`).join("／");
+  }
+  S.aiAnswer=ans;
+  screenRound();
+}
 let selIdx=null;
 function selFund(i){ selIdx=i;
-  FUNDS.forEach((_,k)=>document.getElementById("fund"+k).classList.toggle("sel",k===i));
+  S.curFunds.forEach((_,k)=>document.getElementById("fund"+k).classList.toggle("sel",k===i));
   document.getElementById("goBtn").disabled=false;
 }
 function resolveRound(){
-  const rd=S.round, f=FUNDS[selIdx];
+  const rd=S.round, f=S.curFunds[selIdx];
   const r=fundReturn(f,rd), before=S.wealth;
   S.wealth = S.wealth*(1+r/100);
   S.data.rounds.push({round:rd+1, phase: rd<N_PRACTICE?"practice":"test",
     ai_on:(S.group==="AI"&&rd<N_PRACTICE), shock:(rd===SHOCK_ROUND), choice:f.key,
+    question:(S.aiQ||"").slice(0,200), answer:(S.aiAnswer||"").slice(0,400),
     fund_mu:f.mu.toFixed(2), fund_sd:f.sd.toFixed(2), ret:r.toFixed(2), wealth_after:Math.round(S.wealth)});
+  S.aiQ=null; S.aiAnswer=null;
   const col = r>=0 ? "ok" : "warn";
   const shockNote = (rd===SHOCK_ROUND) ? `<div class="warn">‼️ 信用不安が連鎖し、市場全体が急落しました。</div>` : "";
   render(`<div class="card center"><span class="badge">ラウンド ${rd+1} の結果</span>
@@ -259,16 +321,34 @@ function screenPost(){
 async function finish(){
   S.data.post={satisfaction:parseInt(document.querySelector("input[type=range]").value),
                reason:document.getElementById("reason").value||""};
-  S.data.completion_code = "SU" + String(Math.floor(rngLocal()*9e5)+1e5) + (S.pid+"").slice(-3);
+  // bot指標
+  const total_ms = Date.now()-TLOG[0];
+  let min_screen_ms = 1e9;
+  for(let i=1;i<TLOG.length;i++) min_screen_ms=Math.min(min_screen_ms, TLOG[i]-TLOG[i-1]);
   const payload={pid:S.pid, group:S.group, seed:SEED, final_wealth:Math.round(S.wealth),
+                 worker_id:S.wid||"", honeypot:S.hp||"", webdriver:!!navigator.webdriver, api_fail:S.apiFail,
+                 total_ms:total_ms, min_screen_ms:min_screen_ms,
                  ua:navigator.userAgent.slice(0,80), ...S.data};
   render(`<div class="card center"><p>送信中…</p></div>`);
   try{ await fetch(GAS_URL,{method:"POST",mode:"no-cors",
        headers:{"Content-Type":"text/plain"},body:JSON.stringify(payload)}); }catch(e){}
+  await showCode(1);
+}
+async function showCode(attempt){
+  let code=null;
+  try{
+    const res=await fetch(`${GAS_URL}?action=code&pid=${encodeURIComponent(S.pid)}`);
+    const j=await res.json(); if(j.code) code=j.code;
+  }catch(e){}
+  if(!code && attempt<4){ await new Promise(r=>setTimeout(r,1500)); return showCode(attempt+1); }
+  const codeHtml = code
+    ? `<div class="ok">あなたの完了コード：<div class="big">${code}</div>
+       このコードを募集ページ（クラウドソーシング）に入力してください。</div>`
+    : `<div class="warn">完了コードの取得に失敗しました。<br>
+       <button class="main" onclick="showCode(1)">もう一度取得する</button></div>`;
   render(`<div class="card center"><h1>ご協力ありがとうございました</h1>
   <p>最終資産：<span class="big">${Math.round(S.wealth).toLocaleString()}</span> ポイント</p>
-  <div class="ok">あなたの完了コード：<div class="big">${S.data.completion_code}</div>
-  このコードを募集ページ（クラウドソーシング）に入力してください。</div>
+  ${codeHtml}
   <p class="small">本調査は、AIによる情報提供が投資の意思決定に与える影響を調べる研究の一部です。表示された商品・リターンはすべて架空のものです。</p></div>`);
 }
 screenConsent();
