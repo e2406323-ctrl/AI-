@@ -19,6 +19,7 @@
   th { background:var(--navy); color:#fff; font-weight:600; }
   .fund { border:2px solid #ccd; border-radius:10px; padding:10px 12px; margin:8px 0; cursor:pointer; background:#fff; }
   .fund.sel { border-color:var(--accent); background:#fdf2f0; }
+  .fund.ref { cursor:default; }
   .fund h3 { margin:0 0 4px; font-size:.95rem; color:var(--navy); }
   .ai { background:#eef6ff; border-left:4px solid var(--blue); padding:8px 10px; font-size:.86rem; margin-top:6px; border-radius:0 6px 6px 0; }
   .warn { background:#fbeeec; border-left:4px solid var(--accent); padding:8px 10px; font-size:.9rem; margin:8px 0; }
@@ -38,7 +39,7 @@
 "use strict";
 /* ================= 設定（学生が編集する箇所） ================= */
 const GAS_URL = "https://script.google.com/macros/s/AKfycbx0MFGxkJUtwweD6SKZ-9p734OthMv341t8FVaIg7QzMxtDP5FTapdOaQd8ioX1Tp4T/exec";   // gas_backend.gs をデプロイして取得
-const FORCE_GROUP = AI;         // "AI" / "CTRL" で固定（テスト用）。本番は null
+const FORCE_GROUP = null;         // "AI" / "CTRL" で固定（テスト用・必ずクォートで囲む）。本番は null
 const USE_CHAT_AI = true;         // true=ChatGPTに相談する方式 / false=計算結果を自動表示する方式
 const SEED = 20261212;            // 共通乱数のシード（全参加者共通・変更しないこと）
 
@@ -64,7 +65,12 @@ const FUNDS_T = [
   { key:"T3", name:"商品7", wf:0.60, w:[0.26,0.08,0.06,0.00] },  // LRLR・効率線上（商品5×40%+F60%）
   { key:"T4", name:"商品8", wf:1.00, w:[0.00,0.00,0.00,0.00] },  // 無リスク100%
 ];
-const TEST_ORDER = [2,0,3,1];   // 後半の表示順（固定・全員共通）：位置の持ち越しも防ぐ
+// 後半は「表示ラベル」を常に商品5→6→7→8の順に固定する。
+// 実際の中身（どのFUNDS_Tが割り当たるか）はTEST_ORDERでシャッフルしたまま。
+// ＝参加者からは自然な連番に見えるが、位置と中身の対応は崩してあるので位置の持ち越しを防げる。
+// データ上は choice(実体キー) と displayed_as(表示ラベル) の両方を記録するので開発者側は完全に区別できる。
+const DISPLAY_LABELS_T = ["商品5","商品6","商品7","商品8"];
+const TEST_ORDER = [2,0,3,1];   // 後半、各表示位置に割り当てる実際のFUNDS_Tのインデックス（固定・全員共通）
 const N_PRACTICE = 4, N_TOTAL = 8;   // R1-4練習（AI群は助言あり）/ R5-8本番（全員AIなし）
 const START_WEALTH = 10000;
 const GP_ENDOWMENT = 1000;
@@ -82,7 +88,12 @@ function fundStats(f){
   return { mu:m, sd:s, sharpe: s>0 ? (m-RF)/s : null };
 }
 [...FUNDS_P, ...FUNDS_T].forEach(f=>Object.assign(f, fundStats(f)));
-function fundsFor(rd){ return rd<N_PRACTICE ? FUNDS_P : TEST_ORDER.map(i=>FUNDS_T[i]); }
+// fundsFor(rd): そのラウンドで表示する4商品を返す。各要素に display_name（画面表示用ラベル）を付与する。
+// 前半は display_name === name（そのまま）。後半は display_name が常に商品5〜8の順、name/keyは実体のまま。
+function fundsFor(rd){
+  if(rd<N_PRACTICE) return FUNDS_P.map(f=>({...f, display_name:f.name}));
+  return TEST_ORDER.map((srcIdx,pos)=>({...FUNDS_T[srcIdx], display_name:DISPLAY_LABELS_T[pos]}));
+}
 
 /* ================= 共通乱数（全参加者で同一の市場系列） ================= */
 function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
@@ -125,6 +136,10 @@ function weightTable(f){
   const rows = f.w.map((wi,i)=> wi>0?`<tr><td>${ASSETS[i]}</td><td>${(wi*100).toFixed(0)}%</td></tr>`:"").join("");
   const rf = f.wf>0?`<tr><td>無リスク資産F</td><td>${(f.wf*100).toFixed(0)}%</td></tr>`:"";
   return `<table><tr><th>組入資産</th><th>保有割合</th></tr>${rows}${rf}</table>`;
+}
+// 商品カードを「見るだけ（選択不可）」で並べる。AI相談画面で「今回の選択肢」を提示するのに使う。
+function fundRefCards(FS){
+  return FS.map(f=>`<div class="fund ref"><h3>${f.display_name}</h3>${weightTable(f)}</div>`).join("");
 }
 
 /* ================= 画面フロー ================= */
@@ -232,7 +247,7 @@ function screenRound(){
         (Math.abs(f.sharpe-Math.max(...FS.filter(x=>x.sharpe!==null).map(x=>x.sharpe)))<1e-9 ? "／効率的です" : "／同じリスクでより高いリターンの組合せが存在します");
       ai=`<div class="ai">🤖 AI計算：期待リターン <b>${f.mu.toFixed(2)}%</b>・リスク(σ) <b>${f.sd.toFixed(2)}%</b>${tag}</div>`;
     }
-    return `<div class="fund" id="fund${i}" onclick="selFund(${i})"><h3>${f.name}</h3>${weightTable(f)}${ai}</div>`;
+    return `<div class="fund" id="fund${i}" onclick="selFund(${i})"><h3>${f.display_name}</h3>${weightTable(f)}${ai}</div>`;
   }).join("");
   render(`<div class="card"><span class="badge">ラウンド ${rd+1} / ${N_TOTAL}（${phase}${ai_on?"・AIあり":"・AIなし"}）</span>
   <p>現在の資産：<span class="big">${Math.round(S.wealth).toLocaleString()}</span> ポイント</p>
@@ -242,9 +257,13 @@ function screenRound(){
 }
 function screenAsk(){
   const rd=S.round;
+  const FS = fundsFor(rd);
   render(`<div class="card"><span class="badge">ラウンド ${rd+1} / ${N_TOTAL}（前半・AIあり）</span>
   <p>現在の資産：<span class="big">${Math.round(S.wealth).toLocaleString()}</span> ポイント</p>
   ${assetTable()}
+  <h2>今回選べる4つの商品</h2>
+  <p class="small">AIに質問する前に、今回の選択肢となる4商品の組入資産・保有割合を確認できます。</p>
+  ${fundRefCards(FS)}
   <h2>🤖 AIアドバイザーに相談</h2>
   <p>投資先を選ぶ前に、AIアドバイザーに<b>1回</b>質問できます。商品や資産について、聞きたいことを自由に入力してください。</p>
   <textarea id="aiq" rows="3" maxlength="200" style="width:100%;padding:10px;border:1px solid #ccd;border-radius:8px"
@@ -279,7 +298,8 @@ function resolveRound(){
   const r=fundReturn(f,rd), before=S.wealth;
   S.wealth = S.wealth*(1+r/100);
   S.data.rounds.push({round:rd+1, phase: rd<N_PRACTICE?"practice":"test",
-    ai_on:(S.group==="AI"&&rd<N_PRACTICE), shock:(rd===SHOCK_ROUND), choice:f.key,
+    ai_on:(S.group==="AI"&&rd<N_PRACTICE), shock:(rd===SHOCK_ROUND),
+    choice:f.key, displayed_as:f.display_name, real_name:f.name,
     question:(S.aiQ||"").slice(0,200), answer:(S.aiAnswer||"").slice(0,400),
     fund_mu:f.mu.toFixed(2), fund_sd:f.sd.toFixed(2), ret:r.toFixed(2), wealth_after:Math.round(S.wealth)});
   S.aiQ=null; S.aiAnswer=null;
@@ -287,7 +307,7 @@ function resolveRound(){
   const shockNote = (rd===SHOCK_ROUND) ? `<div class="warn">‼️ 信用不安が連鎖し、市場全体が急落しました。</div>` : "";
   render(`<div class="card center"><span class="badge">ラウンド ${rd+1} の結果</span>
   ${shockNote}
-  <p>${f.name} のリターン：<span class="big">${fmt(r,2)}%</span></p>
+  <p>${f.display_name} のリターン：<span class="big">${fmt(r,2)}%</span></p>
   <div class="${col}">資産：${Math.round(before).toLocaleString()} → <b>${Math.round(S.wealth).toLocaleString()}</b> ポイント</div>
   <button class="main" onclick="afterRound()">次へ</button></div>`);
   selIdx=null;
